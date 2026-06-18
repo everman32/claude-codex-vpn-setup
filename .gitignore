@@ -1,0 +1,4 @@
+.env
+vpn/credentials.txt
+vpn/*.ovpn
+vpn/*.conf

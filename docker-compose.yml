@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────────────────────────
+#  Claude Code + Windscribe VPN — isolated fintech dev environment
+#
+#  Requirements before first run:
+#    1.  Copy .env.example → .env and fill in values
+#        (incl. CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`)
+#    2.  Put windscribe.ovpn  in ./vpn/
+#    3.  Put credentials.txt  in ./vpn/   (user on line 1, pass on line 2)
+#    4.  docker compose build
+#    5.  docker compose up -d
+#    6.  ./cc.ps1     (or: docker exec -it -u dev claude-vpn claude)
+#
+#  Note: the obsolete top-level `version:` key has been removed — Compose v2
+#  ignores it and warns about it.
+# ─────────────────────────────────────────────────────────────────
+
+services:
+  claude-vpn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-vpn
+    hostname: claude-dev
+
+    # ── VPN needs to create a TUN interface ──────────────────────
+    cap_add:
+      - NET_ADMIN       # required: iptables + routing table changes
+      - NET_RAW         # required: raw sockets used by openvpn
+    devices:
+      - /dev/net/tun:/dev/net/tun   # TUN device for OpenVPN
+
+    # ── reach services you run in Docker ON THE HOST ─────────────
+    # Maps host.docker.internal → the host gateway. Automatic on Docker
+    # Desktop, but declaring it is required on plain Linux and harmless
+    # everywhere. The entrypoint opens the kill switch for this address.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # ── volumes ──────────────────────────────────────────────────
+    volumes:
+      # Your project (host path → /workspace inside container).
+      # Bind mount — same inode, no sync layer — so edits Claude makes
+      # are IMMEDIATELY visible in IntelliJ on the host, and vice versa.
+      - ${PROJECT_PATH}:/workspace
+
+      # Maven local repo (bind mount). No longer overlaps a home volume.
+      - ${M2_REPO_PATH}:/home/dev/.m2
+
+      # VPN config (read-only — never bake secrets into the image).
+      - ./vpn:/vpn:ro
+
+      # Persist ALL Claude Code state (config, credentials, projects/
+      # sessions, history) in one dedicated dir via CLAUDE_CONFIG_DIR.
+      # This is what makes `/resume` keep working across restarts.
+      - claude-state:/home/dev/.claude-state
+
+    # ── environment ───────────────────────────────────────────────
+    environment:
+      # Long-lived (1yr) subscription token from `claude setup-token`.
+      # Fixes the "log in every time" problem — no interactive /login.
+      # Do NOT also set ANTHROPIC_API_KEY: it would take precedence.
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+
+      # Centralize Claude Code state into the mounted volume above.
+      - CLAUDE_CONFIG_DIR=/home/dev/.claude-state
+
+      - VPN_TIMEOUT=${VPN_TIMEOUT:-90}
+      # Uncomment to pin a specific VPN config path:
+      # - VPN_CONFIG=/vpn/windscribe-de.ovpn
+
+      # ── Spring Boot overrides for the CONTAINER ONLY ───────────
+      # application.yml keeps its localhost:* URLs untouched, so IntelliJ
+      # on the host still works as-is. Spring's relaxed binding lets these
+      # env vars override the matching properties only inside the container,
+      # repointing the app at host-published services via host.docker.internal.
+      # Adjust names/values to match your app and .env.
+      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5434/postgres}
+      - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-postgres}
+      - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-postgres}
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=${SPRING_KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:19092}
+      # Reminder: host Kafka must ADVERTISE an address the container can reach
+      # (e.g. host.docker.internal:9092), or clients get bounced to localhost.
+
+    # ── keep container alive; Claude Code is run via docker exec ──
+    stdin_open: true
+    tty: true
+
+    restart: unless-stopped
+
+volumes:
+  claude-state:
