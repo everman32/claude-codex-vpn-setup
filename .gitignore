@@ -1,4 +1,8 @@
 .env
+
 vpn/credentials.txt
 vpn/*.ovpn
 vpn/*.conf
+
+# Optional local overrides
+docker-compose.override.yml

@@ -91,34 +91,40 @@ enable_tun_traffic() {
 # This whole step is BEST-EFFORT: a failure here must never abort VPN bringup,
 # so each iptables call is guarded and we never let a bad value reach iptables.
 allow_host_services() {
-    local subnet hgw
-    # Local Docker subnet — IPv4 only (-f inet), so no MAC/IPv6 sneaks in.
-    subnet=$(ip -o -f inet addr show eth0 2>/dev/null | awk '{print $4}' | head -1 || true)
-    if [[ "$subnet" =~ ^[0-9.]+/[0-9]+$ ]]; then
-        if iptables -A OUTPUT -o eth0 -d "$subnet" -j ACCEPT; then
-            log "Allowed local Docker subnet $subnet (host services)"
-        else
-            warn "Could not add Docker-subnet rule for $subnet — skipping."
-        fi
+    local hgw ports
+
+    ports="${HOST_SERVICE_TCP_PORTS:-5434,19092}"
+
+    hgw=$(
+        getent ahostsv4 host.docker.internal 2>/dev/null |
+        awk '{print $1}' |
+        head -1 ||
+        true
+    )
+
+    if [[ ! "$hgw" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        warn "host.docker.internal did not resolve to IPv4."
+        warn "Host services will not be reachable from the container."
+        return 0
     fi
 
-    # host.docker.internal: resolve to IPv4 ONLY. `getent hosts` can return an
-    # IPv6 record first (colon-separated hex — easy to mistake for a MAC), and
-    # feeding that to the IPv4 iptables fails with "host/network not found".
-    # `getent ahostsv4` restricts the lookup to A records.
-    # Note: on plain Linux Docker, host.docker.internal == the bridge gateway,
-    # which already falls inside the subnet rule above, so this is mainly for
-    # Docker Desktop, where it resolves OUTSIDE the eth0 subnet.
-    hgw=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1}' | head -1 || true)
-    if [[ "$hgw" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        if iptables -A OUTPUT -o eth0 -d "$hgw" -j ACCEPT; then
-            log "Allowed host gateway $hgw (host.docker.internal)"
-        else
-            warn "Could not add host-gateway rule for $hgw — skipping."
-        fi
+    if [[ ! "$ports" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        warn "Invalid HOST_SERVICE_TCP_PORTS value: '$ports'."
+        warn "Expected a comma-separated list such as: 5434,19092"
+        return 0
+    fi
+
+    if iptables -A OUTPUT \
+        -o eth0 \
+        -d "$hgw" \
+        -p tcp \
+        -m multiport \
+        --dports "$ports" \
+        -j ACCEPT
+    then
+        log "Allowed host services at $hgw on TCP ports: $ports"
     else
-        warn "host.docker.internal did not resolve to IPv4 — skipping its rule."
-        warn "(Host services should still be reachable via the Docker subnet rule.)"
+        warn "Could not add host-service firewall rule."
     fi
 }
 
@@ -182,12 +188,16 @@ main() {
 
     echo ""
     log "════════════════════════════════════════════════"
-    log " VPN is active.  Workspace: /workspace"
-    log " Run:  docker exec -it -u dev claude-vpn claude"
+    log " VPN is active. Workspace: /workspace"
+    log ""
+    log " Codex:"
+    log "   docker exec -it -u dev -w /workspace ai-vpn codex"
+    log ""
+    log " Claude Code:"
+    log "   docker exec -it -u dev -w /workspace ai-vpn claude"
     log "════════════════════════════════════════════════"
     echo ""
 
-    # Hand off to CMD (default: sleep infinity) — runs as root, see header note.
     exec "$@"
 }
 
