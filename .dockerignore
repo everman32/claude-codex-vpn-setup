@@ -1,0 +1,8 @@
+# Deny the entire repository by default. Only files required to build the
+# development image are sent to the Docker builder.
+**
+
+!Dockerfile
+!scripts/
+!scripts/entrypoint.sh
+!scripts/vpn-dns.sh

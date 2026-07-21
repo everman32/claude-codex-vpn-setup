@@ -24,8 +24,9 @@ services:
       # Project source.
       - ${PROJECT_PATH}:/workspace
 
-      # Maven local repository.
-      - ${M2_REPO_PATH}:/home/dev/.m2
+      # Maven artifact cache only. Host settings.xml, settings-security.xml,
+      # toolchains.xml, and other ~/.m2 secrets are not exposed to the agent.
+      - ${M2_REPO_PATH}:/home/dev/.m2/repository
 
       # VPN configuration and credentials.
       - ./vpn:/vpn:ro
@@ -57,6 +58,11 @@ services:
       # ── VPN ────────────────────────────────────────────────────
       VPN_TIMEOUT: ${VPN_TIMEOUT:-90}
       # VPN_CONFIG: /vpn/windscribe-de.ovpn
+
+      # Optional comma-separated override. When blank, DNS servers pushed by
+      # OpenVPN are used. All configured resolvers must be reachable via tun0.
+      VPN_DNS: ${VPN_DNS:-}
+      VPN_DNS_TEST_HOST: ${VPN_DNS_TEST_HOST:-example.com}
 
       HOST_SERVICE_TCP_PORTS: ${HOST_SERVICE_TCP_PORTS:-5434,19092}
 

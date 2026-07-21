@@ -63,7 +63,7 @@ RUN useradd -m -s /bin/bash dev \
         /workspace \
         /home/dev/.ai-state/claude \
         /home/dev/.ai-state/codex \
-        /home/dev/.m2 \
+        /home/dev/.m2/repository \
     && chown -R dev:dev \
         /workspace \
         /home/dev/.ai-state \
@@ -78,7 +78,8 @@ ENV HOME=/home/dev
 ENV USER=dev
 
 COPY scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY scripts/vpn-dns.sh /usr/local/sbin/vpn-dns-up
+RUN chmod 0755 /entrypoint.sh /usr/local/sbin/vpn-dns-up
 
 HEALTHCHECK \
     --interval=30s \
