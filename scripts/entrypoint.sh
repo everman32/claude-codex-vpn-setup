@@ -135,12 +135,29 @@ enable_tun_traffic() {
 }
 
 block_docker_dns() {
-    # Insert these before the general loopback ACCEPT rule. This prevents
-    # applications from bypassing /etc/resolv.conf and directly querying
-    # Docker's 127.0.0.11 resolver, which forwards to host-configured DNS.
-    iptables -I OUTPUT 1 -d "$DOCKER_DNS" -p udp --dport 53 -j REJECT
-    iptables -I OUTPUT 1 -d "$DOCKER_DNS" -p tcp --dport 53 -j REJECT
+    # Docker's embedded resolver DNATs 127.0.0.11:53 to a per-container,
+    # high-numbered loopback port in the nat OUTPUT chain. The filter OUTPUT
+    # chain therefore no longer sees destination port 53. Block the resolver's
+    # address entirely, before the general loopback ACCEPT rule.
+    iptables -I OUTPUT 1 -d "${DOCKER_DNS}/32" -j REJECT
     log "Docker embedded DNS blocked; external DNS must use VPN resolvers"
+}
+
+verify_docker_dns_blocked() {
+    local test_host="${VPN_DNS_TEST_HOST:-example.com}"
+
+    log "Verifying Docker embedded DNS is unreachable..."
+    if timeout 5 nslookup "$test_host" "$DOCKER_DNS" >/dev/null 2>&1; then
+        error "Docker embedded DNS at $DOCKER_DNS still answered a query."
+        error "─── filter OUTPUT ─────────────────────────────"
+        iptables -S OUTPUT >&2 || true
+        error "─── nat OUTPUT / DOCKER_OUTPUT ────────────────"
+        iptables -t nat -S OUTPUT >&2 || true
+        iptables -t nat -S DOCKER_OUTPUT >&2 || true
+        exit 1
+    fi
+
+    log "Docker embedded DNS is blocked"
 }
 
 # ───────────────── allow host-published services ─────────────────
@@ -320,6 +337,7 @@ main() {
     wait_for_vpn_dns
     enable_tun_traffic
     block_docker_dns
+    verify_docker_dns_blocked
     wait_for_dns_routes
     allow_host_services
     verify_dns_resolution
