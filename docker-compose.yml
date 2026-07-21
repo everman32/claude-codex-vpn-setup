@@ -55,9 +55,10 @@ services:
       CODEX_ACCESS_TOKEN: ${CODEX_ACCESS_TOKEN:-}
 
       # ── VPN ────────────────────────────────────────────────────
-      HOST_SERVICE_TCP_PORTS: ${HOST_SERVICE_TCP_PORTS:-5434,19092}
       VPN_TIMEOUT: ${VPN_TIMEOUT:-90}
       # VPN_CONFIG: /vpn/windscribe-de.ovpn
+
+      HOST_SERVICE_TCP_PORTS: ${HOST_SERVICE_TCP_PORTS:-5434,19092}
 
       # ── Spring Boot container overrides ────────────────────────
       SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5434/postgres}
