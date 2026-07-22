@@ -22,6 +22,7 @@ RUN apt-get update \
         git \
         openssh-client \
         procps \
+        util-linux \
         less \
         jq \
         bubblewrap \
@@ -59,6 +60,7 @@ ENV DISABLE_AUTOUPDATER=1
 
 # ── Non-root development user ────────────────────────────────────
 RUN useradd -m -s /bin/bash dev \
+    && install -d -m 0700 -o root -g root /run/vpn-source \
     && mkdir -p \
         /workspace \
         /home/dev/.ai-state/claude \
@@ -79,14 +81,18 @@ ENV USER=dev
 
 COPY scripts/entrypoint.sh /entrypoint.sh
 COPY scripts/vpn-dns.sh /usr/local/sbin/vpn-dns-up
-RUN chmod 0755 /entrypoint.sh /usr/local/sbin/vpn-dns-up
+COPY scripts/vpn-healthcheck.sh /usr/local/sbin/vpn-healthcheck
+RUN chmod 0755 \
+        /entrypoint.sh \
+        /usr/local/sbin/vpn-dns-up \
+        /usr/local/sbin/vpn-healthcheck
 
 HEALTHCHECK \
     --interval=30s \
-    --timeout=5s \
+    --timeout=25s \
     --start-period=100s \
     --retries=3 \
-    CMD ip link show tun0 >/dev/null 2>&1 || exit 1
+    CMD ["/usr/local/sbin/vpn-healthcheck"]
 
 WORKDIR /workspace
 

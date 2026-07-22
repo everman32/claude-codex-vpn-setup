@@ -1,7 +1,8 @@
 #!/bin/bash
-# entrypoint.sh — Connects Windscribe via OpenVPN, installs an IPv4+IPv6 kill
-# switch, switches DNS to VPN-provided resolvers, verifies the tunnel, opens a
-# hole for selected host-published services, then hands off to CMD.
+# entrypoint.sh — Protects root-only VPN inputs, verifies that IPv6 is
+# disabled, connects Windscribe through OpenVPN, installs an IPv4 kill switch,
+# switches DNS to VPN-provided resolvers, verifies process/route/connectivity,
+# opens selected host-published services, then hands off to CMD.
 #
 # Privilege note: this script runs as root to configure the VPN and iptables,
 # then exec's CMD (default: `sleep infinity`) — which therefore also runs as
@@ -16,12 +17,17 @@ warn()  { echo -e "${YELLOW}[VPN]${NC} $*"; }
 error() { echo -e "${RED}[VPN]${NC} $*" >&2; }
 
 # ─────────────────────────── config ──────────────────────────────
-VPN_CONFIG="${VPN_CONFIG:-/vpn/windscribe.ovpn}"
-VPN_CREDS="${VPN_CREDS:-/vpn/credentials.txt}"
-VPN_LOG="/var/log/openvpn.log"
+VPN_SOURCE_DIR="${VPN_SOURCE_DIR:-/run/vpn-source}"
+VPN_CONFIG="${VPN_CONFIG:-$VPN_SOURCE_DIR/files/windscribe.ovpn}"
+VPN_CREDS="${VPN_CREDS:-$VPN_SOURCE_DIR/files/credentials.txt}"
+VPN_LOG="${VPN_LOG:-/var/log/openvpn.log}"
+VPN_PID_FILE="${VPN_PID_FILE:-/var/run/openvpn.pid}"
+VPN_READY_FILE="${VPN_READY_FILE:-/run/vpn-ready}"
 VPN_TIMEOUT="${VPN_TIMEOUT:-90}"
 VPN_DNS_STATE_DIR="${VPN_DNS_STATE_DIR:-/run/vpn-dns}"
 VPN_DNS_UP_SCRIPT="${VPN_DNS_UP_SCRIPT:-/usr/local/sbin/vpn-dns-up}"
+VPN_HEALTHCHECK_ROUTE_IP="${VPN_HEALTHCHECK_ROUTE_IP:-1.1.1.1}"
+VPN_HEALTHCHECK_URL="${VPN_HEALTHCHECK_URL:-https://example.com/}"
 DOCKER_DNS="127.0.0.11"
 
 is_ipv4() {
@@ -48,6 +54,79 @@ show_openvpn_log_and_exit() {
         error "OpenVPN log is not available."
     fi
     exit 1
+}
+
+# ───────────────── protect root-only VPN inputs ──────────────────
+protect_vpn_inputs() {
+    local path path_real source_real
+
+    # The VPN directory is bind-mounted below this image-created parent.
+    # Parent-directory traversal permissions protect every profile, key, and
+    # credential file even if Docker Desktop reports permissive file modes.
+    install -d -m 0700 -o root -g root "$VPN_SOURCE_DIR"
+    chmod 0700 "$VPN_SOURCE_DIR"
+    chown root:root "$VPN_SOURCE_DIR"
+    source_real=$(realpath -e "$VPN_SOURCE_DIR")
+
+    for path in "$VPN_CONFIG" "$VPN_CREDS"; do
+        path_real=$(realpath -m "$path")
+        [[ "$path_real" == "$source_real/"* ]] || {
+            error "VPN input '$path' escapes protected directory '$VPN_SOURCE_DIR'."
+            exit 1
+        }
+    done
+
+    [[ -f "$VPN_CONFIG" ]] || {
+        error "No VPN config found at '$VPN_CONFIG'."
+        exit 1
+    }
+
+    if [[ -e "$VPN_CREDS" ]]; then
+        [[ -f "$VPN_CREDS" ]] || {
+            error "VPN credentials path is not a regular file: '$VPN_CREDS'."
+            exit 1
+        }
+
+        if runuser -u dev -- test -r "$VPN_CREDS"; then
+            error "VPN credentials are readable by the dev user."
+            error "The protected parent directory must remain root:root mode 0700."
+            exit 1
+        fi
+        log "VPN credentials are protected from the dev user"
+    else
+        log "No separate VPN credentials file mounted; continuing without --auth-user-pass"
+    fi
+}
+
+# ─────────────────── explicit IPv6 shutdown ─────────────────────
+verify_ipv6_disabled() {
+    local path value
+
+    [[ -d /proc/sys/net/ipv6/conf ]] || {
+        log "IPv6 is unavailable in this network namespace"
+        return 0
+    }
+
+    for path in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+        [[ -r "$path" ]] || {
+            error "Cannot verify IPv6 state at '$path'."
+            exit 1
+        }
+        value=$(cat "$path")
+        if [[ "$value" != "1" ]]; then
+            error "IPv6 is not disabled for ${path%/disable_ipv6}."
+            error "Keep the net.ipv6.conf.*.disable_ipv6 sysctls in docker-compose.yml."
+            exit 1
+        fi
+    done
+
+    if ip -6 address show scope global | grep -q 'inet6'; then
+        error "A global IPv6 address remains after IPv6 was meant to be disabled."
+        ip -6 address show scope global >&2 || true
+        exit 1
+    fi
+
+    log "IPv6 is disabled for every interface in the container namespace"
 }
 
 # ─────────────────────── parse VPN server ────────────────────────
@@ -93,15 +172,13 @@ pin_vpn_endpoint() {
 }
 
 # ─────────────────────── kill switch ─────────────────────────────
-# Block all outbound IPv4 and IPv6 except:
-#   • loopback during bootstrap
-#   • established/related traffic
-#   • the pre-resolved VPN endpoint IPs
-# Later, tun0 and selected host service ports are allowed. Docker's embedded
-# resolver is explicitly blocked after VPN DNS has been installed.
+# IPv6 is disabled at the network-namespace level and verified above. For
+# IPv4, block all outbound traffic except loopback during bootstrap,
+# established/related traffic, and the pre-resolved VPN endpoints. Later,
+# tun0 and selected host service ports are allowed.
 setup_kill_switch() {
     log "Installing iptables kill switch (IPv4)..."
-    iptables -F OUTPUT 2>/dev/null || true
+    iptables -F OUTPUT
     iptables -P OUTPUT DROP
 
     iptables -A OUTPUT -o lo -j ACCEPT
@@ -115,22 +192,11 @@ setup_kill_switch() {
         done
     fi
 
-    # IPv6 is blocked outright because this setup uses an IPv4 VPN endpoint.
-    if command -v ip6tables >/dev/null 2>&1; then
-        log "Installing kill switch (IPv6 — full block)..."
-        ip6tables -F OUTPUT 2>/dev/null || true
-        ip6tables -P OUTPUT DROP 2>/dev/null || true
-        ip6tables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || true
-        ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
-    fi
-
-    log "Kill switch active — all other outbound traffic is blocked"
+    log "IPv4 kill switch active — all other outbound traffic is blocked"
 }
 
 enable_tun_traffic() {
     iptables -A OUTPUT -o tun0 -j ACCEPT
-    command -v ip6tables >/dev/null 2>&1 && \
-        ip6tables -A OUTPUT -o tun0 -j ACCEPT 2>/dev/null || true
     log "tun0 outbound traffic allowed"
 }
 
@@ -201,15 +267,22 @@ allow_host_services() {
 
 # ─────────────────────── start OpenVPN ───────────────────────────
 start_vpn() {
+    local config_dir config_name
+
     log "Launching OpenVPN..."
     rm -rf "$VPN_DNS_STATE_DIR"
+    rm -f "$VPN_PID_FILE" "$VPN_READY_FILE"
     mkdir -p "$VPN_DNS_STATE_DIR"
 
+    config_dir=$(dirname "$VPN_CONFIG")
+    config_name=$(basename "$VPN_CONFIG")
+
     local args=(
-        --config "$VPN_CONFIG"
+        --cd "$config_dir"
+        --config "$config_name"
         --daemon
         --log "$VPN_LOG"
-        --writepid /var/run/openvpn.pid
+        --writepid "$VPN_PID_FILE"
         --script-security 2
         --up "$VPN_DNS_UP_SCRIPT"
         --up-restart
@@ -219,20 +292,39 @@ start_vpn() {
     openvpn "${args[@]}"
 }
 
-wait_for_tun() {
-    log "Waiting for tunnel interface tun0 (timeout: ${VPN_TIMEOUT}s)..."
-    local elapsed=0
+wait_for_vpn_route() {
+    local elapsed=0 pid route
 
+    log "Waiting for OpenVPN process, tun0, and a VPN route (timeout: ${VPN_TIMEOUT}s)..."
     while (( elapsed < VPN_TIMEOUT )); do
-        ip link show tun0 &>/dev/null && {
-            log "tun0 is up after ${elapsed}s ✓"
-            return 0
-        }
+        if [[ -s "$VPN_PID_FILE" ]]; then
+            pid=$(cat "$VPN_PID_FILE")
+            if [[ "$pid" =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null; then
+                show_openvpn_log_and_exit "OpenVPN exited before the tunnel became ready."
+            fi
+        fi
+
+        if [[ -s "$VPN_PID_FILE" ]] && ip link show dev tun0 >/dev/null 2>&1; then
+            local comm
+            pid=$(cat "$VPN_PID_FILE")
+            comm=$(cat "/proc/$pid/comm" 2>/dev/null || true)
+            route=$(ip -4 route get "$VPN_HEALTHCHECK_ROUTE_IP" 2>/dev/null || true)
+            if [[ "$pid" =~ ^[0-9]+$ ]] \
+                && kill -0 "$pid" 2>/dev/null \
+                && [[ "$comm" == openvpn* ]] \
+                && [[ "$route" =~ dev[[:space:]]+tun0 ]]; then
+                log "OpenVPN process, tun0, and route through tun0 are ready after ${elapsed}s ✓"
+                return 0
+            fi
+        fi
+
         sleep 2
         (( elapsed+=2 ))
     done
 
-    show_openvpn_log_and_exit "tun0 did not appear within ${VPN_TIMEOUT}s — VPN failed to connect."
+    route=$(ip -4 route get "$VPN_HEALTHCHECK_ROUTE_IP" 2>/dev/null || true)
+    show_openvpn_log_and_exit \
+        "VPN was not ready within ${VPN_TIMEOUT}s; route to $VPN_HEALTHCHECK_ROUTE_IP: ${route:-no route}."
 }
 
 wait_for_vpn_dns() {
@@ -247,7 +339,7 @@ wait_for_vpn_dns() {
             return 0
         fi
 
-        if [[ -f /var/run/openvpn.pid ]] && ! kill -0 "$(cat /var/run/openvpn.pid)" 2>/dev/null; then
+        if [[ -f "$VPN_PID_FILE" ]] && ! kill -0 "$(cat "$VPN_PID_FILE")" 2>/dev/null; then
             show_openvpn_log_and_exit "OpenVPN exited before DNS was configured."
         fi
 
@@ -302,38 +394,64 @@ verify_dns_resolution() {
     log "VPN DNS resolution succeeded"
 }
 
-# ──────────────────── verify external IP ─────────────────────────
-verify_vpn() {
+# ───────────────── verify tunnel connectivity ───────────────────
+verify_vpn_connectivity() {
+    [[ -z "$VPN_HEALTHCHECK_URL" ]] && {
+        warn "VPN_HEALTHCHECK_URL is blank; skipping the HTTPS startup check."
+        return 0
+    }
+
+    log "Testing HTTPS connectivity through tun0..."
+    if ! curl \
+        --fail \
+        --silent \
+        --show-error \
+        --output /dev/null \
+        --connect-timeout 5 \
+        --max-time "${VPN_HEALTHCHECK_HTTP_TIMEOUT:-10}" \
+        --interface tun0 \
+        "$VPN_HEALTHCHECK_URL";
+    then
+        show_openvpn_log_and_exit \
+            "HTTPS connectivity through tun0 failed for '$VPN_HEALTHCHECK_URL'."
+    fi
+    log "HTTPS connectivity through tun0 succeeded"
+}
+
+verify_external_ip() {
     log "Checking external IP through tun0..."
     local ip
     ip=$(curl -s --max-time 10 --interface tun0 https://ifconfig.me 2>/dev/null \
          || echo "unknown")
     if [[ "$ip" == "unknown" ]]; then
-        warn "Could not determine external IP — proceeding anyway."
+        warn "Could not determine external IP; the mandatory connectivity check already passed."
     else
         log "External IP: $ip  ← should be a Windscribe exit node"
     fi
 }
 
+mark_vpn_ready() {
+    : >"$VPN_READY_FILE"
+    chmod 0644 "$VPN_READY_FILE"
+    log "VPN health state marked ready"
+}
+
 # ─────────────────────────── main ────────────────────────────────
 main() {
-    if [[ ! -f "$VPN_CONFIG" ]]; then
-        error "No VPN config found at '$VPN_CONFIG'."
-        error "Mount your windscribe.ovpn file:"
-        error "  -v /path/to/vpn:/vpn:ro"
-        exit 1
-    fi
+    rm -f "$VPN_READY_FILE"
 
     if [[ ! -x "$VPN_DNS_UP_SCRIPT" ]]; then
         error "VPN DNS helper is missing or not executable: $VPN_DNS_UP_SCRIPT"
         exit 1
     fi
 
+    protect_vpn_inputs
+    verify_ipv6_disabled
     parse_vpn_server
     pin_vpn_endpoint
     setup_kill_switch
     start_vpn
-    wait_for_tun
+    wait_for_vpn_route
     wait_for_vpn_dns
     enable_tun_traffic
     block_docker_dns
@@ -341,7 +459,9 @@ main() {
     wait_for_dns_routes
     allow_host_services
     verify_dns_resolution
-    verify_vpn
+    verify_vpn_connectivity
+    verify_external_ip
+    mark_vpn_ready
 
     echo ""
     log "════════════════════════════════════════════════"

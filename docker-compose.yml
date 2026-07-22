@@ -17,6 +17,12 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
 
+    # Disable IPv6 in this container's network namespace. The entrypoint and
+    # health check verify every interface and fail closed if this is not true.
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+      net.ipv6.conf.default.disable_ipv6: "1"
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -28,8 +34,13 @@ services:
       # toolchains.xml, and other ~/.m2 secrets are not exposed to the agent.
       - ${M2_REPO_PATH}:/home/dev/.m2/repository
 
-      # VPN configuration and credentials.
-      - ./vpn:/vpn:ro
+      # The VPN directory is mounted beneath an image-created root:root 0700
+      # parent. This preserves profiles with auxiliary cert/key files while
+      # preventing the dev user from traversing to any VPN secrets.
+      - type: bind
+        source: ${VPN_DIR_PATH:-./vpn}
+        target: /run/vpn-source/files
+        read_only: true
 
       # Shared volume, separate provider-specific subdirectories:
       #   /home/dev/.ai-state/claude
@@ -57,7 +68,18 @@ services:
 
       # ── VPN ────────────────────────────────────────────────────
       VPN_TIMEOUT: ${VPN_TIMEOUT:-90}
-      # VPN_CONFIG: /vpn/windscribe-de.ovpn
+      VPN_SOURCE_DIR: /run/vpn-source
+      VPN_CONFIG: /run/vpn-source/files/${VPN_CONFIG_FILE:-windscribe.ovpn}
+      VPN_CREDS: /run/vpn-source/files/${VPN_CREDS_FILE:-credentials.txt}
+
+      # Process/route/connectivity health checks. ROUTE_IP must be a numeric
+      # public IPv4 address expected to route through tun0. Set URL blank only
+      # when an external HTTPS probe is intentionally undesired.
+      VPN_HEALTHCHECK_ROUTE_IP: ${VPN_HEALTHCHECK_ROUTE_IP:-1.1.1.1}
+      VPN_HEALTHCHECK_HOST: ${VPN_HEALTHCHECK_HOST:-example.com}
+      VPN_HEALTHCHECK_URL: ${VPN_HEALTHCHECK_URL:-https://example.com/}
+      VPN_HEALTHCHECK_DNS_TIMEOUT: ${VPN_HEALTHCHECK_DNS_TIMEOUT:-8}
+      VPN_HEALTHCHECK_HTTP_TIMEOUT: ${VPN_HEALTHCHECK_HTTP_TIMEOUT:-10}
 
       # Optional comma-separated override. When blank, DNS servers pushed by
       # OpenVPN are used. All configured resolvers must be reachable via tun0.

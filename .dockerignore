@@ -6,3 +6,4 @@
 !scripts/
 !scripts/entrypoint.sh
 !scripts/vpn-dns.sh
+!scripts/vpn-healthcheck.sh
