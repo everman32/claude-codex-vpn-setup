@@ -14,6 +14,16 @@ services:
       - NET_ADMIN
       - NET_RAW
 
+    # bubblewrap creates nested Linux namespaces. Docker's default seccomp
+    # profile blocks clone/unshare namespace operations for non-root users,
+    # which makes both Claude and Codex nested sandboxes fail before they can
+    # apply their own restrictions. Keep the capability set narrow and disable
+    # only the outer seccomp filter; do not add SYS_ADMIN or privileged mode.
+    # no-new-privileges still prevents setuid/file-capability escalation.
+    security_opt:
+      - seccomp=unconfined
+      - no-new-privileges=true
+
     devices:
       - /dev/net/tun:/dev/net/tun
 
