@@ -7,3 +7,6 @@
 !scripts/entrypoint.sh
 !scripts/vpn-dns.sh
 !scripts/vpn-healthcheck.sh
+
+!scripts/ai-sandbox-check.sh
+!scripts/claude-managed-settings.json

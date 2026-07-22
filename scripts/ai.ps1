@@ -7,12 +7,16 @@
 #
 # Usage:
 #   ./scripts/ai.ps1
-#   ./scripts/ai.ps1 --help
 #   ./scripts/ai.ps1 login
 #   ./scripts/ai.ps1 status
+#   ./scripts/ai.ps1 logout
+#   ./scripts/ai.ps1 doctor
+#   ./scripts/ai.ps1 sandbox-check
 #
 # One-command override:
 #   $env:AI_TOOL = "claude"; ./scripts/ai.ps1
+#
+# A Docker TTY is allocated only when host stdin and stdout are not redirected.
 
 $ErrorActionPreference = "Stop"
 
@@ -53,11 +57,8 @@ function Get-DotEnvValue {
         }
 
         $Value = $Parts[1].Trim()
-
-        # Strip a trailing inline comment and matching simple quotes.
         $Value = ($Value -replace '\s+#.*$', '').Trim()
         $Value = $Value.Trim('"').Trim("'")
-
         return $Value
     }
 
@@ -69,18 +70,27 @@ function Invoke-AiCli {
         [Parameter(Mandatory)]
         [string] $Command,
 
-        [Parameter(ValueFromRemainingArguments)]
-        [string[]] $CommandArgs
+        [string[]] $CommandArgs = @()
     )
 
-    & docker exec `
-        -it `
-        -u dev `
-        -w $WorkDir `
-        $Container `
-        $Command `
-        @CommandArgs
+    $DockerArgs = @("exec", "-i")
 
+    if (
+        -not [Console]::IsInputRedirected -and
+        -not [Console]::IsOutputRedirected
+    ) {
+        $DockerArgs += "-t"
+    }
+
+    $DockerArgs += @(
+        "-u", "dev",
+        "-w", $WorkDir,
+        $Container,
+        $Command
+    )
+    $DockerArgs += $CommandArgs
+
+    & docker @DockerArgs
     exit $LASTEXITCODE
 }
 
@@ -109,7 +119,7 @@ $Health = docker inspect `
 switch ($Health) {
     "unhealthy" {
         Write-Host `
-            "Warning: container is unhealthy; tun0 may be down." `
+            "Warning: container is unhealthy; VPN checks are failing." `
             -ForegroundColor Yellow
         Write-Host `
             "The selected CLI may fail to reach its API." `
@@ -128,28 +138,38 @@ switch ($Health) {
 
 $FirstArg = if ($args.Count -gt 0) { $args[0] } else { $null }
 $RemainingArgs = if ($args.Count -gt 1) {
-    $args[1..($args.Count - 1)]
+    @($args[1..($args.Count - 1)])
 } else {
     @()
+}
+
+if ($FirstArg -eq "sandbox-check") {
+    Invoke-AiCli `
+        -Command "/usr/local/sbin/ai-sandbox-check" `
+        -CommandArgs $RemainingArgs
 }
 
 switch ($Tool.ToLowerInvariant()) {
     "codex" {
         switch ($FirstArg) {
             "login" {
-                Invoke-AiCli codex @("login") @RemainingArgs
+                Invoke-AiCli -Command "codex" -CommandArgs (@("login") + $RemainingArgs)
             }
 
             "status" {
-                Invoke-AiCli codex @("login", "status") @RemainingArgs
+                Invoke-AiCli -Command "codex" -CommandArgs (@("login", "status") + $RemainingArgs)
             }
 
             "logout" {
-                Invoke-AiCli codex @("logout") @RemainingArgs
+                Invoke-AiCli -Command "codex" -CommandArgs (@("logout") + $RemainingArgs)
+            }
+
+            "doctor" {
+                Invoke-AiCli -Command "codex" -CommandArgs (@("doctor") + $RemainingArgs)
             }
 
             default {
-                Invoke-AiCli codex @args
+                Invoke-AiCli -Command "codex" -CommandArgs @($args)
             }
         }
     }
@@ -157,15 +177,27 @@ switch ($Tool.ToLowerInvariant()) {
     "claude" {
         switch ($FirstArg) {
             "login" {
-                Invoke-AiCli claude @("/login") @RemainingArgs
+                Invoke-AiCli -Command "claude" -CommandArgs (@("auth", "login") + $RemainingArgs)
+            }
+
+            "status" {
+                Invoke-AiCli -Command "claude" -CommandArgs (@("auth", "status") + $RemainingArgs)
+            }
+
+            "logout" {
+                Invoke-AiCli -Command "claude" -CommandArgs (@("auth", "logout") + $RemainingArgs)
             }
 
             "setup-token" {
-                Invoke-AiCli claude @("setup-token") @RemainingArgs
+                Invoke-AiCli -Command "claude" -CommandArgs (@("setup-token") + $RemainingArgs)
+            }
+
+            "doctor" {
+                Invoke-AiCli -Command "claude" -CommandArgs (@("doctor") + $RemainingArgs)
             }
 
             default {
-                Invoke-AiCli claude @args
+                Invoke-AiCli -Command "claude" -CommandArgs @($args)
             }
         }
     }

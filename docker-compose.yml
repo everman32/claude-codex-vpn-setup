@@ -4,8 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-latest}
-        CODEX_VERSION: ${CODEX_VERSION:-latest}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.217}
+        CODEX_VERSION: ${CODEX_VERSION:-0.145.0}
 
     container_name: ai-vpn
     hostname: ai-dev

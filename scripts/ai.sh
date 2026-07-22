@@ -8,14 +8,18 @@
 #
 # Usage:
 #   ./scripts/ai.sh
-#   ./scripts/ai.sh --help
 #   ./scripts/ai.sh login
 #   ./scripts/ai.sh status
+#   ./scripts/ai.sh logout
+#   ./scripts/ai.sh doctor
+#   ./scripts/ai.sh sandbox-check
 #
-# You can override the selection for one invocation:
+# Override the tool for one invocation:
 #   AI_TOOL=claude ./scripts/ai.sh
-#   AI_TOOL=codex  ./scripts/ai.sh
 #
+# Non-interactive input and redirected output are supported. A TTY is allocated
+# only when both the host stdin and stdout are terminals.
+
 # Git Bash only: prevent MSYS from rewriting Linux container paths.
 export MSYS_NO_PATHCONV=1
 
@@ -78,7 +82,7 @@ check_health() {
 
     case "$health" in
         unhealthy)
-            warn "Container '$CONTAINER' is unhealthy; tun0 may be down."
+            warn "Container '$CONTAINER' is unhealthy; VPN checks are failing."
             warn "The selected CLI may not reach its API."
             warn "Inspect it with: docker logs $CONTAINER"
             ;;
@@ -93,8 +97,12 @@ run_in_container() {
     local command="$1"
     shift
 
-    exec docker exec \
-        -it \
+    local -a docker_args=(exec -i)
+    if [[ -t 0 && -t 1 ]]; then
+        docker_args+=(-t)
+    fi
+
+    exec docker "${docker_args[@]}" \
         -u dev \
         -w "$WORKDIR" \
         "$CONTAINER" \
@@ -111,6 +119,12 @@ fi
 
 check_health
 
+# This checks both installed agents and does not depend on AI_TOOL.
+if [[ "${1:-}" == "sandbox-check" ]]; then
+    shift
+    run_in_container /usr/local/sbin/ai-sandbox-check "$@"
+fi
+
 case "${AI_TOOL,,}" in
     codex)
         case "${1:-}" in
@@ -126,6 +140,10 @@ case "${AI_TOOL,,}" in
                 shift
                 run_in_container codex logout "$@"
                 ;;
+            doctor)
+                shift
+                run_in_container codex doctor "$@"
+                ;;
             *)
                 run_in_container codex "$@"
                 ;;
@@ -136,11 +154,23 @@ case "${AI_TOOL,,}" in
         case "${1:-}" in
             login)
                 shift
-                run_in_container claude /login "$@"
+                run_in_container claude auth login "$@"
+                ;;
+            status)
+                shift
+                run_in_container claude auth status "$@"
+                ;;
+            logout)
+                shift
+                run_in_container claude auth logout "$@"
                 ;;
             setup-token)
                 shift
                 run_in_container claude setup-token "$@"
+                ;;
+            doctor)
+                shift
+                run_in_container claude doctor "$@"
                 ;;
             *)
                 run_in_container claude "$@"
